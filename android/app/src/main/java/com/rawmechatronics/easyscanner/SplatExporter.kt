@@ -36,10 +36,22 @@ object SplatExporter {
         }
         val cx = (minx + maxx) / 2f; val cy = (miny + maxy) / 2f; val cz = (minz + maxz) / 2f
         val vol = ((maxx - minx) * (maxy - miny) * (maxz - minz)).coerceAtLeast(1f)
-        var s = (1.5 * Math.cbrt((vol / n).toDouble())).toFloat()
-        s = s.coerceIn(0.6f, 6.0f)
-        val buf = ByteBuffer.allocate(n * 32).order(ByteOrder.LITTLE_ENDIAN)
+        // voxel-downsample so viewers stay responsive (3 mm, 4 mm for big clouds)
+        val voxel = if (n > 150000) 4.0f else 3.0f
+        val scaleOut = voxel * 0.8f
+        val seen = HashSet<Int>()
+        val sel = ArrayList<Int>(Math.min(n, 80000))
         for (i in 0 until n) {
+            val o = start + i * stride
+            val kx = Math.floor((bb.getFloat(o) / voxel).toDouble()).toInt() + 512
+            val ky = Math.floor((bb.getFloat(o + 4) / voxel).toDouble()).toInt() + 512
+            val kz = Math.floor((bb.getFloat(o + 8) / voxel).toDouble()).toInt() + 512
+            val key = (kx shl 20) or (ky shl 10) or kz
+            if (seen.add(key)) sel.add(i)
+        }
+        val buf = ByteBuffer.allocate(sel.size * 32).order(ByteOrder.LITTLE_ENDIAN)
+        for (si in 0 until sel.size) {
+            val i = sel[si]
             val o = start + i * stride
             val x = bb.getFloat(o); val y = bb.getFloat(o + 4); val z = bb.getFloat(o + 8)
             val r = data[o + 12].toInt() and 0xff
@@ -49,13 +61,13 @@ object SplatExporter {
             buf.putFloat(x - cx)
             buf.putFloat(z - cz)
             buf.putFloat(-(y - cy))
-            buf.putFloat(s); buf.putFloat(s); buf.putFloat(s)
+            buf.putFloat(scaleOut); buf.putFloat(scaleOut); buf.putFloat(scaleOut)
             buf.put(r.toByte()); buf.put(g.toByte()); buf.put(b.toByte()); buf.put(0xff.toByte())
             // identity quaternion packed as (128,128,128,255)
             buf.put(128.toByte()); buf.put(128.toByte()); buf.put(128.toByte()); buf.put(0xff.toByte())
         }
         FileOutputStream(out).use { it.write(buf.array()) }
-        return n
+        return sel.size
     }
 
     private fun indexOf(hay: ByteArray, needle: ByteArray): Int {
