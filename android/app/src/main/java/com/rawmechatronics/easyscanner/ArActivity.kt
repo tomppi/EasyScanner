@@ -742,6 +742,21 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
             scanOn = false
             processor?.command(Cmd.SCAN_STOP) { msg -> runOnUiThread { status.text = msg } }
             Log.i(TAG, "keyframes: " + kfIndex + " in " + kfDir)
+            val dir = kfDir
+            if (dir != null) {
+                Thread {
+                    try {
+                        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".jpg") }
+                            ?.sortedBy { it.name } ?: emptyList()
+                        if (files.size >= 2) {
+                            val msg = LoopCheck.relocalisation(this, files.first(), files.last())
+                            Log.i(TAG, "sp loop " + files.first().name + ".." + files.last().name + ": " + msg)
+                        }
+                    } catch (ex: Exception) {
+                        Log.e(TAG, "sp loop failed", ex)
+                    }
+                }.start()
+            }
         }
     }
 
