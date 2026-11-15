@@ -57,9 +57,10 @@ object SplatExporter {
             val r = data[o + 12].toInt() and 0xff
             val g = data[o + 13].toInt() and 0xff
             val b = data[o + 14].toInt() and 0xff
-            // Z-up -> Y-up, centred
+            // AR PLYs are Z-up with the height stored negated (engine frame), so
+            // flip Z to get a Y-up. Centred at the cloud midpoint.
             buf.putFloat(x - cx)
-            buf.putFloat(z - cz)
+            buf.putFloat(-(z - cz))
             buf.putFloat(-(y - cy))
             buf.putFloat(scaleOut); buf.putFloat(scaleOut); buf.putFloat(scaleOut)
             buf.put(r.toByte()); buf.put(g.toByte()); buf.put(b.toByte()); buf.put(0xff.toByte())
