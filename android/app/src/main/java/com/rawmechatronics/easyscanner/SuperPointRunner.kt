@@ -116,8 +116,9 @@ object SuperPointRunner {
                 "\$D/qnn-net-run --backend \$D/libQnnHtp.so --retrieve_context \$D/context.bin " +
                 "--input_list " + list.absolutePath + " --output_dir \$D/out " +
                 "--config_file \$D/htp_ext.json --use_native_input_files --use_native_output_files; rc=\$?; " +
+                "rm -rf " + outDir.absolutePath + "; mkdir -p " + outDir.absolutePath + "; " +
                 "cp -r \$D/out/. " + outDir.absolutePath + "/ 2>/dev/null; " +
-                "chmod -R 666 " + outDir.absolutePath + " 2>/dev/null; exit \$rc"
+                "chmod -R a+rX " + outDir.absolutePath + " 2>/dev/null; exit \$rc"
             try {
                 val p2 = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
                 output += p2.inputStream.bufferedReader().readText()
