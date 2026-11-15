@@ -3,6 +3,11 @@ package com.rawmechatronics.easyscanner
 import android.content.Context
 import android.util.Log
 import java.io.File
+import org.opencv.android.OpenCVLoader
+import org.opencv.calib3d.Calib3d
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint2f
+import org.opencv.core.Point
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -18,11 +23,58 @@ object LoopCheck {
 
     private class Feat(val kp: FloatArray, val desc: FloatArray, val n: Int)
 
+    private fun inliers(p1: MutableList<Point>, p2: MutableList<Point>, k1: DoubleArray, k2: DoubleArray): Int {
+        if (p1.size < 8) return -1
+        if (!OpenCVLoader.initLocal()) return -2
+        val a = MatOfPoint2f(*p1.toTypedArray())
+        val b = MatOfPoint2f(*p2.toTypedArray())
+        val k1m = Mat(3, 3, org.opencv.core.CvType.CV_64F)
+        val k2m = Mat(3, 3, org.opencv.core.CvType.CV_64F)
+        k1m.put(0, 0, *doubleArrayOf(k1[0], 0.0, k1[2], 0.0, k1[1], k1[3], 0.0, 0.0, 1.0))
+        k2m.put(0, 0, *doubleArrayOf(k2[0], 0.0, k2[2], 0.0, k2[1], k2[3], 0.0, 0.0, 1.0))
+        val e = Calib3d.findEssentialMat(a, b, k1m, Calib3d.RANSAC, 0.999, 1.5)
+        val E = DoubleArray(9)
+        e.get(0, 0, E)
+        var n = 0
+        val t = 2.0 / k1[0]
+        for (i in 0 until p1.size) {
+            val x1 = (p1[i].x - k1[2]) / k1[0]
+            val y1 = (p1[i].y - k1[3]) / k1[1]
+            val x2 = (p2[i].x - k2[2]) / k2[0]
+            val y2 = (p2[i].y - k2[3]) / k2[1]
+            val ex = x2 * (E[0] * x1 + E[1] * y1 + E[2]) + y2 * (E[3] * x1 + E[4] * y1 + E[5]) +
+                (E[6] * x1 + E[7] * y1 + E[8])
+            val a1 = E[0] * x2 + E[3] * y2 + E[6]
+            val a2 = E[1] * x2 + E[4] * y2 + E[7]
+            val b1 = E[0] * x1 + E[1] * y1 + E[2]
+            val b2 = E[3] * x1 + E[4] * y1 + E[5]
+            val d = ex * ex / (a1 * a1 + a2 * a2 + b1 * b1 + b2 * b2 + 1e-12)
+            if (d < t * t) n++
+        }
+        return n
+    }
+
+    private fun intrinsicsFor(dir: File, name: String): DoubleArray? {
+        val f = File(dir, "keyframes.jsonl")
+        if (!f.exists()) return null
+        for (line in f.readLines()) {
+            if (line.isBlank()) continue
+            val o = org.json.JSONObject(line)
+            if (o.optString("file") == name) {
+                val k = o.getJSONArray("k")
+                return doubleArrayOf(k.getDouble(0), k.getDouble(1), k.getDouble(2), k.getDouble(3))
+            }
+        }
+        return null
+    }
+
     fun relocalisation(ctx: Context, first: File, last: File): String {
         val a = features(ctx, first) ?: return "first inference failed"
         val b = features(ctx, last) ?: return "last inference failed"
         if (a.n < 50 || b.n < 50) return "too few keypoints: " + a.n + "/" + b.n
         var matches = 0
+        val mp1 = ArrayList<Point>()
+        val mp2 = ArrayList<Point>()
         var ratioSum = 0.0
         for (i in 0 until a.n) {
             var best = -1
@@ -44,11 +96,19 @@ object LoopCheck {
             if (best >= 0 && bestS > 0.6f && secondS < bestS - 0.05f) {
                 matches++
                 ratioSum += (bestS - secondS).toDouble()
+                mp1.add(Point(a.kp[i * 2].toDouble(), a.kp[i * 2 + 1].toDouble()))
+                mp2.add(Point(b.kp[best * 2].toDouble(), b.kp[best * 2 + 1].toDouble()))
             }
         }
         val purity = if (matches > 0) ratioSum / matches else 0.0
+        val k1 = intrinsicsFor(first.parentFile, first.name)
+        val k2 = intrinsicsFor(last.parentFile, last.name)
+        var inl = -3
+        if (k1 != null && k2 != null) {
+            inl = try { inliers(mp1, mp2, k1, k2) } catch (ex: Exception) { -4 }
+        }
         return "kp=" + a.n + "/" + b.n + " matches=" + matches +
-            " mean_margin=" + String.format("%.3f", purity)
+            " mean_margin=" + String.format("%.3f", purity) + " essential_inliers=" + inl
     }
 
     private fun features(ctx: Context, jpeg: File): Feat? {
