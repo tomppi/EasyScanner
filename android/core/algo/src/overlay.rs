@@ -77,8 +77,8 @@ pub fn axes(k: &Intrinsics, pose: &Pose, len: f64) -> [Option<[f32; 4]>; 3] {
 }
 
 /// The working-volume wireframe, each edge split in `pieces`.
-pub fn volume_edges(k: &Intrinsics, pose: &Pose, vol: &Volume, pieces: usize, out: &mut Vec<[f32; 4]>) {
-    let c = vol.corners(pose);
+pub fn volume_edges(k: &Intrinsics, pose: &Pose, vol: &Volume, up: f64, pieces: usize, out: &mut Vec<[f32; 4]>) {
+    let c = vol.corners(pose, up);
     for (a, b) in Volume::EDGES {
         polyline(k, pose, c[a], c[b], pieces, out);
     }

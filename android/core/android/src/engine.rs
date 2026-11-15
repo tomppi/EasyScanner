@@ -312,15 +312,16 @@ impl Engine {
         ts_ns: i64,
         pose: Pose,
         k: Intrinsics,
+        up: f64,
     ) -> opencv::Result<&[f32]> {
-        self.process_inner(f, ts_ns, Some((pose, k)))
+        self.process_inner(f, ts_ns, Some((pose, k, up)))
     }
 
     fn process_inner(
         &mut self,
         f: &YuvFrame,
         ts_ns: i64,
-        ar: Option<(Pose, Intrinsics)>,
+        ar: Option<(Pose, Intrinsics, f64)>,
     ) -> opencv::Result<&[f32]> {
         let t0 = Instant::now();
         let (w, hgt) = (f.width as u32, f.height as u32);
@@ -335,10 +336,21 @@ impl Engine {
         }
 
         let k = match &ar {
-            Some((_, k)) => *k,
+            Some((_, k, _)) => *k,
             None => self.k_base.for_frame(w, hgt),
         };
-        let (n_corners, pose_res, t_board) = if let Some((pose, _)) = ar {
+        // Laser-plane calibration in AR mode: use the same board detection and
+        // plane fit as the board app, with ARCore's per-frame K and the board
+        // pose it solves in the ARCore camera frame.
+        let ar_plane_cal = ar.is_some() && self.plane_active;
+        let (n_corners, pose_res, t_board) = if ar_plane_cal {
+            let gray = unsafe {
+                Mat::new_rows_cols_with_data_unsafe(hgt as i32, w as i32, CV_8UC1, f.y.as_ptr() as *mut _, f.y_stride)
+            }?;
+            let n = self.tracker.detect(&gray)?;
+            let pose_res = self.tracker.solve_pose(&k)?;
+            (n, pose_res, t0.elapsed())
+        } else if let Some((pose, _, _)) = ar {
             (0usize, Some(PoseResult { pose, reproj_rms: f64::NAN, margin: None }), t0.elapsed())
         } else {
             // the luma plane IS the grey image ArUco wants - wrapped, not copied
@@ -384,6 +396,10 @@ impl Engine {
         let vol = self.volume();
         let params = self.laser_params();
         let pose = pose_res.as_ref().map(|p| p.pose);
+        let up = match &ar {
+            Some((_, _, u)) => *u,
+            None => pose.map(|p| p.up_sign()).unwrap_or(1.0),
+        };
         let mut found = false;
         let mut roi_frac = f64::NAN;
         let mut board_stripe: Option<BoardStripe> = None;
@@ -394,7 +410,7 @@ impl Engine {
             let volume_roi;
             let roi = match pose {
                 Some(p) => {
-                    volume_roi = vol.roi(&p, &k, f.width, f.height);
+                    volume_roi = vol.roi(&p, &k, f.width, f.height, up);
                     volume_roi.as_ref()
                 }
                 None if self.cfg.laser.without_board => Some(&self.full_roi),
@@ -413,7 +429,7 @@ impl Engine {
         }
 
         // ── laser-plane calibration: on-board stripes across tilts ──
-        if ar.is_none() && self.plane_active && let Some(s) = &board_stripe {
+        if self.plane_active && let Some(s) = &board_stripe {
             let n_lines = self.plane_cal.add(&s.cam_pts);
             let last = self.plane_cal.last_rms.map(|r| format!(" — last fit {r:.1}mm")).unwrap_or_default();
             self.msgs.plane = format!("vary board tilt{last}");
@@ -447,7 +463,7 @@ impl Engine {
             let (cloud, px, scan_on) = (&mut self.cloud, &self.laser_px, self.scan_on);
             stripe::to_laser_plane(px, &k, n, d, |i, x| {
                 let b = p.to_board(x);
-                if vol.contains(&p, b) {
+                if vol.contains(&p, b, up) {
                     inside[i] = true;
                     if scan_on {
                         let (u, v) = (px[i][0].round() as usize, px[i][1].round() as usize);
@@ -492,7 +508,7 @@ impl Engine {
         // ── result: header + overlay layers ──
         self.out.begin();
         self.fill_header(&k, n_corners, pose_res.as_ref(), focus_pct, board_stripe.as_ref(), found, roi_frac);
-        self.emit_layers(&k, pose, &vol, classified, board_stripe.as_ref());
+        self.emit_layers(&k, pose, &vol, classified, board_stripe.as_ref(), up);
         let o = &mut self.out;
         o.set(h::T_TOTAL_MS, t0.elapsed().as_secs_f64() * 1e3);
         o.set(h::T_BOARD_MS, t_board.as_secs_f64() * 1e3);
@@ -639,7 +655,7 @@ impl Engine {
         o.set(h::CY, k.cy);
     }
 
-    fn emit_layers(&mut self, k: &Intrinsics, pose: Option<Pose>, vol: &Volume, classified: bool, stripe: Option<&BoardStripe>) {
+    fn emit_layers(&mut self, k: &Intrinsics, pose: Option<Pose>, vol: &Volume, classified: bool, stripe: Option<&BoardStripe>, up: f64) {
         let draw = self.cfg.draw;
         let b = self.cfg.board;
         if draw.corners {
@@ -667,7 +683,7 @@ impl Engine {
             }
             if draw.volume {
                 self.segs.clear();
-                overlay::volume_edges(k, &p, vol, 4, &mut self.segs);
+                overlay::volume_edges(k, &p, vol, up, 4, &mut self.segs);
                 self.out.segments(layer::VOLUME, &self.segs);
             }
             if draw.cloud && !self.preview.is_empty() {

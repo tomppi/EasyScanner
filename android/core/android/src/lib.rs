@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use jni::JNIEnv;
 use jni::objects::{ JByteBuffer, JClass, JFloatArray, JString, JDoubleArray };
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jdouble, jint, jlong, jstring};
 use scan_algo::laser::YuvFrame;
 
 use engine::Engine;
@@ -151,6 +151,7 @@ pub extern "system" fn Java_com_rawmechatronics_easyscanner_NativeLib_nativeProc
     timestamp_ns: jlong,
     pose: JDoubleArray<'l>,
     intrinsics: JDoubleArray<'l>,
+    up_sign: jdouble,
     out: JFloatArray<'l>,
 ) -> jint {
     guard(&mut env, 0, |env| {
@@ -198,7 +199,7 @@ pub extern "system" fn Java_com_rawmechatronics_easyscanner_NativeLib_nativeProc
             uv_pixel_stride: ps,
         };
         let data = unsafe { engine(handle) }?
-            .process_ar(&frame, timestamp_ns, camera_pose, k)
+            .process_ar(&frame, timestamp_ns, camera_pose, k, up_sign)
             .map_err(|e| e.to_string())?;
         let cap = env.get_array_length(&out).map_err(|e| e.to_string())? as usize;
         if data.len() > cap {

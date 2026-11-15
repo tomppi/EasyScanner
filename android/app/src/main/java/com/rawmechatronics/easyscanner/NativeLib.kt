@@ -23,7 +23,7 @@ internal object NativeLib {
         y: ByteBuffer, yStride: Int,
         u: ByteBuffer, v: ByteBuffer, uvStride: Int, uvPixelStride: Int,
         width: Int, height: Int, timestampNs: Long,
-        pose: DoubleArray, intrinsics: DoubleArray,
+        pose: DoubleArray, intrinsics: DoubleArray, upSign: Double,
         out: FloatArray,
     ): Int
 

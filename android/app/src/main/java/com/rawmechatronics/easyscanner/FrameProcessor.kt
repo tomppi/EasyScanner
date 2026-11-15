@@ -130,7 +130,7 @@ class FrameProcessor(filesDir: String, private val listener: Listener) : ImageRe
         y: ByteBuffer, yStride: Int,
         u: ByteBuffer, v: ByteBuffer, uvStride: Int, uvPixelStride: Int,
         width: Int, height: Int, timestampNs: Long,
-        pose: DoubleArray, intrinsics: DoubleArray,
+        pose: DoubleArray, intrinsics: DoubleArray, upSign: Double,
     ) = handler.post {
         if (handle == 0L) return@post
         try {
@@ -138,7 +138,7 @@ class FrameProcessor(filesDir: String, private val listener: Listener) : ImageRe
             val t0 = System.nanoTime()
             var n = NativeLib.nativeProcessAr(
                 handle, y, yStride, u, v, uvStride, uvPixelStride,
-                width, height, timestampNs, pose, intrinsics, out.data,
+                width, height, timestampNs, pose, intrinsics, upSign, out.data,
             )
             out.procMs = (System.nanoTime() - t0) / 1e6
             if (n < 0) {

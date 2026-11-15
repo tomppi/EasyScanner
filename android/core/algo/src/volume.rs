@@ -38,9 +38,9 @@ impl Volume {
 
     /// Board-frame corners, index = `xi·4 + yi·2 + zi`, with the top face on
     /// the camera side of the board.
-    pub fn corners(&self, pose: &Pose) -> [V3; 8] {
+    pub fn corners(&self, pose: &Pose, up: f64) -> [V3; 8] {
         let (x0, x1, y0, y1) = self.bounds();
-        let ztop = pose.up_sign() * self.height;
+        let ztop = up * self.height;
         let mut c = [[0.0; 3]; 8];
         for (i, x) in [x0, x1].into_iter().enumerate() {
             for (j, y) in [y0, y1].into_iter().enumerate() {
@@ -55,17 +55,17 @@ impl Volume {
     /// Whether a board-frame point lies inside the volume and above the board
     /// surface — the scan's "object" test.
     #[inline]
-    pub fn contains(&self, pose: &Pose, p: V3) -> bool {
-        let up = pose.up_sign() * p[2];
-        up > BOARD_EPS_MM && up <= self.height && self.in_footprint(p)
+    pub fn contains(&self, _pose: &Pose, p: V3, up: f64) -> bool {
+        let up_coord = up * p[2];
+        up_coord > BOARD_EPS_MM && up_coord <= self.height && self.in_footprint(p)
     }
 
     /// The image region covered by the volume: the convex hull of its
     /// projected corners, rasterised to row spans. `None` when too little of
     /// the volume is in front of the camera.
-    pub fn roi(&self, pose: &Pose, k: &Intrinsics, w: usize, h: usize) -> Option<Roi> {
+    pub fn roi(&self, pose: &Pose, k: &Intrinsics, w: usize, h: usize, up: f64) -> Option<Roi> {
         let mut pts: Vec<[f64; 2]> = self
-            .corners(pose)
+            .corners(pose, up)
             .iter()
             .map(|&c| pose.to_cam(c))
             .filter(|c| c[2] > 1.0)
@@ -190,9 +190,9 @@ mod tests {
         assert!(a as usize <= cx && cx < b as usize);
         // up is toward the camera: board +Z points away from it here
         let up = pose.up_sign();
-        assert!(vol.contains(&pose, [100.0, 100.0, up * 50.0]));
-        assert!(!vol.contains(&pose, [100.0, 100.0, -up * 50.0]));
-        assert!(!vol.contains(&pose, [100.0, 100.0, up * 1.0]));
-        assert!(!vol.contains(&pose, [400.0, 100.0, up * 50.0]));
+        assert!(vol.contains(&pose, [100.0, 100.0, up * 50.0], up));
+        assert!(!vol.contains(&pose, [100.0, 100.0, -up * 50.0], up));
+        assert!(!vol.contains(&pose, [100.0, 100.0, up * 1.0], up));
+        assert!(!vol.contains(&pose, [400.0, 100.0, up * 50.0], up));
     }
 }
