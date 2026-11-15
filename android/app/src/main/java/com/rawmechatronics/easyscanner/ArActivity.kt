@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -31,12 +33,14 @@ import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import java.io.File
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -67,6 +71,7 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
     private var session: Session? = null
     private var processor: FrameProcessor? = null
     private var installRequested = false
+    private var resumed = false
 
     /** Anchor point on a detected plane: the origin of the scan frame. */
     private var anchor: FloatArray? = null
@@ -82,6 +87,12 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
     private var viewTx = 0f
     private var viewTy = 0f
     private var tapPending: FloatArray? = null
+    private var frames = 0
+    private var loggedTex = false
+    private val io = Executors.newSingleThreadExecutor()
+    private var kfDir: File? = null
+    private var kfIndex = 0
+    private var lastKfMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +105,7 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
         surface.setOnTouchListener { _, e -> onSurfaceTouch(e) }
         status = TextView(this).apply {
             setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xAA000000.toInt())
             textSize = 13f
             setPadding(24, 24, 24, 24)
             text = "Looking for ARCore…"
@@ -142,6 +154,8 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
                 processor = FrameProcessor(filesDir.absolutePath, this)
                 processor?.configure(AR_CONFIG)
             }
+            processor?.command(Cmd.AR_MODE, "1")
+            resumed = true
             status.text = "Move the phone. Tap the table next to the object to set the scan origin."
         } catch (e: UnavailableArcoreNotInstalledException) {
             status.text = "ARCore is not installed (Google Play Services for AR)."
@@ -159,6 +173,7 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
 
     override fun onPause() {
         super.onPause()
+        resumed = false
         if (scanOn) {
             scanOn = false
             processor?.command(Cmd.SCAN_STOP)
@@ -216,12 +231,16 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
             return
         }
         if (!scanOn) {
+            kfDir = File(getExternalFilesDir(null), "kf-" + System.currentTimeMillis()).apply { mkdirs() }
+            kfIndex = 0
+            lastKfMs = 0L
             processor?.command(Cmd.CLOUD_CLEAR)
             processor?.command(Cmd.SCAN_START) { msg -> runOnUiThread { status.text = msg } }
             scanOn = true
         } else {
             scanOn = false
             processor?.command(Cmd.SCAN_STOP) { msg -> runOnUiThread { status.text = msg } }
+            Log.i(TAG, "keyframes: " + kfIndex + " in " + kfDir)
         }
     }
 
@@ -261,6 +280,7 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
 
     override fun onSurfaceCreated(unused: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
+        Log.i(TAG, "GL vendor=" + GLES20.glGetString(GLES20.GL_VENDOR) + " renderer=" + GLES20.glGetString(GLES20.GL_RENDERER))
         program = buildProgram()
         uTex = GLES20.glGetUniformLocation(program, "uTex")
         val ids = IntArray(1)
@@ -280,17 +300,44 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
         GLES20.glViewport(0, 0, width, height)
         viewTx = width.toFloat()
         viewTy = height.toFloat()
+        try {
+            @Suppress("DEPRECATION")
+            val rot = windowManager.defaultDisplay.rotation
+            session?.setDisplayGeometry(rot, width, height)
+        } catch (ex: Exception) {
+            Log.w(TAG, "setDisplayGeometry failed: " + ex.message)
+        }
     }
 
     override fun onDrawFrame(unused: GL10?) {
+        if (!resumed) return
         val s = session
         if (s == null) {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
             return
         }
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         s.setCameraTextureName(textureId)
-        val frame = s.update()
+        val frame = try {
+            s.update()
+        } catch (ex: Exception) {
+            Log.w(TAG, "update failed: " + ex.message)
+            return
+        }
         drawBackground(frame)
+        // GL liveness marker: magenta square, bottom-left
+        GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glScissor(0, 0, 48, 48)
+        GLES20.glClearColor(1f, 0f, 1f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        frames++
+        if (frames % 30 == 0) {
+            val px = readPixel(viewTx.toInt() / 2, viewTy.toInt() / 2)
+            val mk = readPixel(24, 24)
+            Log.i(TAG, "diag " + frames + " " + cameraStats(frame) + " center=" + px + " marker=" + mk)
+        }
         val state = frame.camera.trackingState
         tapPending?.let { tap ->
             tapPending = null
@@ -298,18 +345,27 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
         }
         if (state == TrackingState.TRACKING && anchor != null) processFrame(frame)
         runOnUiThread {
-            if (state == TrackingState.PAUSED) {
-                status.text = "AR tracking paused: move the phone more slowly / add light."
-            }
+            val cam = cameraStats(frame)
+            status.text = "track=" + state + "  cam=" + cam + "  points=" + pointCount
         }
     }
 
     private fun drawBackground(frame: Frame) {
         GLES20.glUseProgram(program)
+        quadCoords.position(0)
         frame.transformCoordinates2d(
-            Coordinates2d.VIEW_NORMALIZED, quadCoords,
+            Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES, quadCoords,
             Coordinates2d.TEXTURE_NORMALIZED, quadTexCoords,
         )
+        quadCoords.position(0)
+        quadTexCoords.position(0)
+        if (!loggedTex) {
+            val arr = FloatArray(8)
+            quadTexCoords.get(arr)
+            quadTexCoords.position(0)
+            Log.i(TAG, "texcoords " + arr.joinToString(","))
+            loggedTex = true
+        }
         val aPos = GLES20.glGetAttribLocation(program, "aPos")
         val aTex = GLES20.glGetAttribLocation(program, "aTex")
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, quadCoords)
@@ -322,6 +378,47 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(aPos)
         GLES20.glDisableVertexAttribArray(aTex)
+    }
+
+    /** RGBA of the framebuffer at (x,y) in GL coordinates (origin bottom-left). */
+    private fun readPixel(x: Int, y: Int): String {
+        val b = java.nio.ByteBuffer.allocateDirect(4)
+        GLES20.glReadPixels(x, y, 1, 1, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, b)
+        return String.format("%d,%d,%d", b.get(0).toInt() and 0xff, b.get(1).toInt() and 0xff, b.get(2).toInt() and 0xff)
+    }
+
+    /** Diagnostics: camera image size and mean luma (sampled Y plane), or why it failed. */
+    private fun cameraStats(frame: Frame): String {
+        val image = try {
+            frame.acquireCameraImage()
+        } catch (ex: Exception) {
+            return "no image (" + (ex.message ?: "error") + ")"
+        }
+        try {
+            val y = image.planes[0]
+            val buf = y.buffer.duplicate()
+            buf.rewind()
+            val w = image.width
+            val h = image.height
+            var sum = 0L
+            var n = 0
+            val row = ByteArray(w)
+            var yPos = 0
+            var lines = 0
+            while (lines < h && buf.remaining() >= w) {
+                buf.position(yPos)
+                buf.get(row, 0, w)
+                for (v in row) { sum += (v.toInt() and 0xff); n++ }
+                yPos += y.rowStride
+                lines += 4
+            }
+            val mean = if (n > 0) sum.toDouble() / n else -1.0
+            return w.toString() + "x" + h + " luma=" + String.format("%.0f", mean)
+        } catch (ex: Exception) {
+            return "stats failed"
+        } finally {
+            image.close()
+        }
     }
 
     private fun placeAnchor(frame: Frame, x: Float, y: Float) {
@@ -357,6 +454,24 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
             val v = copyDirect(planes[2].buffer)
             val k = intrinsics(frame, image.width, image.height)
             val pose = boardToCamera(frame, a)
+            val now = System.currentTimeMillis()
+            if (scanOn && now - lastKfMs > 500) {
+                lastKfMs = now
+                val dir = kfDir
+                if (dir != null) {
+                    val planesCopy = arrayOf(
+                        copyDirect(planes[0].buffer), copyDirect(planes[1].buffer), copyDirect(planes[2].buffer),
+                    )
+                    val strides = intArrayOf(planes[0].rowStride, planes[1].rowStride, planes[1].pixelStride)
+                    val w = image.width
+                    val h = image.height
+                    val idx = kfIndex++
+                    val poseCopy = pose.copyOf()
+                    val kCopy = k.copyOf()
+                    val ts = image.timestamp
+                    io.execute { saveKeyframe(dir, idx, planesCopy, strides, w, h, ts, poseCopy, kCopy) }
+                }
+            }
             processor.processArFrame(
                 y, planes[0].rowStride,
                 u, v, planes[1].rowStride, planes[1].pixelStride,
@@ -428,6 +543,56 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
             s0z, s1z, s2z, ez,
             0.0, 0.0, 0.0, 1.0,
         )
+    }
+
+    /** Convert one ARCore YUV_420_888 frame to a JPEG and append its pose row. */
+    private fun saveKeyframe(
+        dir: File,
+        index: Int,
+        planes: Array<ByteBuffer>,
+        strides: IntArray,
+        w: Int,
+        h: Int,
+        ts: Long,
+        pose: DoubleArray,
+        k: DoubleArray,
+    ) {
+        try {
+            val yStride = strides[0]
+            val uvStride = strides[1]
+            val uvPixel = strides[2]
+            val nv21 = ByteArray(w * h + w * h / 2)
+            var p = 0
+            for (row in 0 until h) {
+                planes[0].position(row * yStride)
+                planes[0].get(nv21, p, w)
+                p += w
+            }
+            for (row in 0 until h / 2) {
+                val vBase = row * uvStride
+                for (col in 0 until w / 2) {
+                    val vi = vBase + col * uvPixel
+                    planes[2].position(vi)
+                    nv21[p++] = planes[2].get()
+                    planes[1].position(vi)
+                    nv21[p++] = planes[1].get()
+                }
+            }
+            val file = File(dir, String.format("kf_%04d.jpg", index))
+            FileOutputStream(file).use { out ->
+                YuvImage(nv21, android.graphics.ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), 90, out)
+            }
+            val row = org.json.JSONObject().apply {
+                put("i", index)
+                put("t", ts)
+                put("file", file.name)
+                put("pose", org.json.JSONArray(pose.toList()))
+                put("k", org.json.JSONArray(k.toList()))
+            }
+            File(dir, "keyframes.jsonl").appendText(row.toString() + System.lineSeparator())
+        } catch (ex: Exception) {
+            Log.w(TAG, "keyframe " + index + " failed: " + ex.message)
+        }
     }
 
     private fun copyDirect(src: ByteBuffer): ByteBuffer {

@@ -60,6 +60,8 @@ pub mod cmd {
     pub const CHECKPOINT: i32 = 19;
     /// no more photos in the open session, which keeps the scan (no still stream can be had)
     pub const PHOTOS_OFF: i32 = 20;
+    /// arg: "1"/"0" - pose comes from ARCore, skip the plane-camera-model gate
+    pub const AR_MODE: i32 = 21;
 }
 
 /// The Z-up cloud a session keeps next to orbiter-native's `laser.ply`.
@@ -144,6 +146,8 @@ pub struct Engine {
     plane_active: bool,
     plane_solved_at: usize,
     scan_on: bool,
+    /// Pose comes from an external tracker (ARCore): no board, plane model check skipped.
+    ar_mode: bool,
     cloud: PointCloud,
     /// The cloud has points the open session (or, with none open, any session) has not written.
     cloud_unsaved: bool,
@@ -190,6 +194,7 @@ impl Engine {
             plane_active: false,
             plane_solved_at: 0,
             scan_on: false,
+            ar_mode: false,
             cloud_unsaved: false,
             preview: Vec::new(),
             frame_no: 0,
@@ -744,7 +749,7 @@ impl Engine {
             cmd::SCAN_START => {
                 if self.plane.is_none() {
                     "calibrate the laser plane first".to_string()
-                } else if self.usable_plane().is_none() {
+                } else if !self.ar_mode && self.usable_plane().is_none() {
                     "the laser plane was fitted with another camera calibration — calibrate it again".to_string()
                 } else {
                     self.scan_on = true;
@@ -778,6 +783,10 @@ impl Engine {
                 } else {
                     self.stop_photos_keep_session(arg)
                 }
+            }
+            cmd::AR_MODE => {
+                self.ar_mode = arg != "0";
+                format!("AR pose mode {}", if self.ar_mode { "on" } else { "off" })
             }
             cmd::EXPORT_PLY => self.export_ply(arg),
             cmd::PHOTOS_START => self.open_photos(arg),
