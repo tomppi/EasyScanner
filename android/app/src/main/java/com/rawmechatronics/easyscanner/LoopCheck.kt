@@ -23,9 +23,9 @@ object LoopCheck {
 
     private class Feat(val kp: FloatArray, val desc: FloatArray, val n: Int)
 
-    private fun inliers(p1: MutableList<Point>, p2: MutableList<Point>, k1: DoubleArray, k2: DoubleArray): Int {
-        if (p1.size < 8) return -1
-        if (!OpenCVLoader.initLocal()) return -2
+    private fun inliers(p1: MutableList<Point>, p2: MutableList<Point>, k1: DoubleArray, k2: DoubleArray, prior: DoubleArray?): Pair<Int, Double> {
+        if (p1.size < 8) return Pair(-1, Double.NaN)
+        if (!OpenCVLoader.initLocal()) return Pair(-2, Double.NaN)
         val a = MatOfPoint2f(*p1.toTypedArray())
         val b = MatOfPoint2f(*p2.toTypedArray())
         val k1m = Mat(3, 3, org.opencv.core.CvType.CV_64F)
@@ -33,6 +33,14 @@ object LoopCheck {
         k1m.put(0, 0, *doubleArrayOf(k1[0], 0.0, k1[2], 0.0, k1[1], k1[3], 0.0, 0.0, 1.0))
         k2m.put(0, 0, *doubleArrayOf(k2[0], 0.0, k2[2], 0.0, k2[1], k2[3], 0.0, 0.0, 1.0))
         val e = Calib3d.findEssentialMat(a, b, k1m, Calib3d.RANSAC, 0.999, 1.5)
+        var rotErr = Double.NaN
+        if (prior != null) {
+            val r1 = Mat(); val r2 = Mat(); val t = Mat()
+            Calib3d.decomposeEssentialMat(e, r1, r2, t)
+            val a1 = DoubleArray(9); r1.get(0, 0, a1)
+            val a2 = DoubleArray(9); r2.get(0, 0, a2)
+            rotErr = Math.min(rotationError(a1, prior), rotationError(a2, prior))
+        }
         val E = DoubleArray(9)
         e.get(0, 0, E)
         var n = 0
@@ -51,8 +59,43 @@ object LoopCheck {
             val d = ex * ex / (a1 * a1 + a2 * a2 + b1 * b1 + b2 * b2 + 1e-12)
             if (d < t * t) n++
         }
-        return n
+        return Pair(n, rotErr)
     }
+
+    private fun rotationError(r: DoubleArray, prior: DoubleArray): Double {
+        var tr = 0.0
+        for (i in 0 until 9) tr += r[i] * prior[i]
+        val c = ((tr - 1.0) / 2.0).coerceIn(-1.0, 1.0)
+        return Math.toDegrees(Math.acos(c))
+    }
+
+    private fun poseFor(dir: File, name: String): DoubleArray? {
+        val f = File(dir, "keyframes.jsonl")
+        if (!f.exists()) return null
+        for (line in f.readLines()) {
+            if (line.isBlank()) continue
+            val o = org.json.JSONObject(line)
+            if (o.optString("file") == name) {
+                val p = o.getJSONArray("pose")
+                return doubleArrayOf(
+                    p.getDouble(0), p.getDouble(1), p.getDouble(2),
+                    p.getDouble(4), p.getDouble(5), p.getDouble(6),
+                    p.getDouble(8), p.getDouble(9), p.getDouble(10))
+            }
+        }
+        return null
+    }
+
+    private fun mulAt(a: DoubleArray, b: DoubleArray): DoubleArray {
+        val out = DoubleArray(9)
+        for (i in 0 until 3) for (j in 0 until 3) {
+            var v = 0.0
+            for (k in 0 until 3) v += a[i * 3 + k] * b[k * 3 + j]
+            out[i * 3 + j] = v
+        }
+        return out
+    }
+    private fun transpose(a: DoubleArray): DoubleArray = doubleArrayOf(a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8])
 
     private fun intrinsicsFor(dir: File, name: String): DoubleArray? {
         val f = File(dir, "keyframes.jsonl")
@@ -104,11 +147,22 @@ object LoopCheck {
         val k1 = intrinsicsFor(first.parentFile, first.name)
         val k2 = intrinsicsFor(last.parentFile, last.name)
         var inl = -3
+        var rotErr = Double.NaN
         if (k1 != null && k2 != null) {
-            inl = try { inliers(mp1, mp2, k1, k2) } catch (ex: Exception) { -4 }
+            val pa = poseFor(first.parentFile, first.name)
+            val pb = poseFor(last.parentFile, last.name)
+            val prior = if (pa != null && pb != null) mulAt(pb, transpose(pa)) else null
+            try {
+                val r = inliers(mp1, mp2, k1, k2, prior)
+                inl = r.first
+                rotErr = r.second
+            } catch (ex: Exception) {
+                inl = -4
+            }
         }
         return "kp=" + a.n + "/" + b.n + " matches=" + matches +
-            " mean_margin=" + String.format("%.3f", purity) + " essential_inliers=" + inl
+            " mean_margin=" + String.format("%.3f", purity) + " essential_inliers=" + inl +
+            " rot_err_deg=" + String.format("%.2f", rotErr)
     }
 
     private fun features(ctx: Context, jpeg: File): Feat? {
