@@ -153,6 +153,7 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
     private var boxHeightMm = DEFAULT_BOX_MM * 0.75
     private var placeHerePending = false
     private var boxOffsetMm = 10f
+    private var spSelfTestStarted = false
     private var loggedTex = false
     private val io = Executors.newSingleThreadExecutor()
     private var kfDir: File? = null
@@ -320,6 +321,21 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
             resumed = true
             surface.onResume()
             status.text = "Move the phone. Tap the table next to the object to set the scan origin."
+            if (!spSelfTestStarted) {
+                spSelfTestStarted = true
+                Thread {
+                    try {
+                        val kf = newestKeyframe()
+                        if (kf == null) {
+                            Log.i(TAG, "sp selftest: no keyframe yet")
+                        } else {
+                            Log.i(TAG, "sp selftest on " + kf.absolutePath + ": " + SuperPointRunner.runOnJpeg(this, kf))
+                        }
+                    } catch (ex: Exception) {
+                        Log.e(TAG, "sp selftest failed", ex)
+                    }
+                }.start()
+            }
         } catch (e: UnavailableArcoreNotInstalledException) {
             status.text = "ARCore is not installed (Google Play Services for AR)."
         } catch (e: UnavailableApkTooOldException) {
@@ -636,6 +652,14 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
         processor?.command(Cmd.CLOUD_CLEAR)
         pointCount = 0
         setHint("Box placed: its floor is 10 mm below the table so the model base is not clipped. Drag/arrows to fine-tune.", 6000)
+    }
+
+    private fun newestKeyframe(): File? {
+        val base = getExternalFilesDir(null) ?: return null
+        val dirs = base.listFiles { f -> f.isDirectory && f.name.startsWith("kf-") } ?: return null
+        val dir = dirs.maxByOrNull { it.lastModified() } ?: return null
+        return dir.listFiles { f -> f.isFile && f.name.endsWith(".jpg") }
+            ?.maxByOrNull { it.lastModified() }
     }
 
     private fun showBoxSettings() {
