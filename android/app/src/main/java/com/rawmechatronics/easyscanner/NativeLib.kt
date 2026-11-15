@@ -17,6 +17,16 @@ internal object NativeLib {
     @JvmStatic external fun nativeCommand(handle: Long, code: Int, arg: String?): String
     @JvmStatic external fun nativeMessages(handle: Long): String
 
+    /** Process one YUV frame with an external (ARCore) camera pose + intrinsics. */
+    @JvmStatic external fun nativeProcessAr(
+        handle: Long,
+        y: ByteBuffer, yStride: Int,
+        u: ByteBuffer, v: ByteBuffer, uvStride: Int, uvPixelStride: Int,
+        width: Int, height: Int, timestampNs: Long,
+        pose: DoubleArray, intrinsics: DoubleArray,
+        out: FloatArray,
+    ): Int
+
     /**
      * Process one YUV_420_888 frame in place ([timestampNs]: its sensor
      * timestamp). Returns the number of floats written to [out], or `-needed`

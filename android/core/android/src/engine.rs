@@ -294,6 +294,29 @@ impl Engine {
     /// One analysis frame; `ts_ns` is its sensor timestamp, the clock the
     /// stills of a photo session are matched on.
     pub fn process(&mut self, f: &YuvFrame, ts_ns: i64) -> opencv::Result<&[f32]> {
+        self.process_inner(f, ts_ns, None)
+    }
+
+    /// One analysis frame whose camera pose and intrinsics come from an external
+    /// tracker (ARCore). `pose` is scan-frame -> camera (the same convention the
+    /// ChArUco board pose uses); `k` is the camera model for this frame. No board
+    /// detection and no live recalibration: the saved laser plane is used as-is.
+    pub fn process_ar(
+        &mut self,
+        f: &YuvFrame,
+        ts_ns: i64,
+        pose: Pose,
+        k: Intrinsics,
+    ) -> opencv::Result<&[f32]> {
+        self.process_inner(f, ts_ns, Some((pose, k)))
+    }
+
+    fn process_inner(
+        &mut self,
+        f: &YuvFrame,
+        ts_ns: i64,
+        ar: Option<(Pose, Intrinsics)>,
+    ) -> opencv::Result<&[f32]> {
         let t0 = Instant::now();
         let (w, hgt) = (f.width as u32, f.height as u32);
         if self.last_wh != (w, hgt) {
@@ -302,26 +325,39 @@ impl Engine {
             self.last_wh = (w, hgt);
         }
         self.frame_no += 1;
-        self.poll_calibration();
+        if ar.is_none() {
+            self.poll_calibration();
+        }
 
-        let k = self.k_base.for_frame(w, hgt);
-        // the luma plane IS the grey image ArUco wants — wrapped, not copied
-        let gray = unsafe {
-            Mat::new_rows_cols_with_data_unsafe(hgt as i32, w as i32, CV_8UC1, f.y.as_ptr() as *mut _, f.y_stride)
-        }?;
-        let n_corners = self.tracker.detect(&gray)?;
-        let pose_res = self.tracker.solve_pose(&k)?;
-        let t_board = t0.elapsed();
+        let k = match &ar {
+            Some((_, k)) => *k,
+            None => self.k_base.for_frame(w, hgt),
+        };
+        let (n_corners, pose_res, t_board) = if let Some((pose, _)) = ar {
+            (0usize, Some(PoseResult { pose, reproj_rms: f64::NAN, margin: None }), t0.elapsed())
+        } else {
+            // the luma plane IS the grey image ArUco wants - wrapped, not copied
+            let gray = unsafe {
+                Mat::new_rows_cols_with_data_unsafe(hgt as i32, w as i32, CV_8UC1, f.y.as_ptr() as *mut _, f.y_stride)
+            }?;
+            let n = self.tracker.detect(&gray)?;
+            let pose_res = self.tracker.solve_pose(&k)?;
+            (n, pose_res, t0.elapsed())
+        };
 
-        let sharpness = corner_bbox(&self.tracker.corners)
-            .and_then(|bb| laplacian_variance(f.y, f.y_stride, (f.width, f.height), bb, 40_000));
+        let sharpness = if ar.is_some() {
+            None
+        } else {
+            corner_bbox(&self.tracker.corners)
+                .and_then(|bb| laplacian_variance(f.y, f.y_stride, (f.width, f.height), bb, 40_000))
+        };
         let focus_pct = sharpness.map(|s| {
             self.focus_max = self.focus_max.max(s);
             100.0 * s / self.focus_max
         });
 
         // ── live intrinsics calibration: every genuinely new view ──
-        if self.calib_active && pose_res.is_some() && !self.calib.solving() {
+        if ar.is_none() && self.calib_active && pose_res.is_some() && !self.calib.solving() {
             if self.calib.capture(&self.tracker.corners, &self.tracker.ids, (w, hgt)) {
                 let (n, t) = (self.calib.count(), self.calib.target);
                 self.msgs.calib = if n < t {
@@ -372,7 +408,7 @@ impl Engine {
         }
 
         // ── laser-plane calibration: on-board stripes across tilts ──
-        if self.plane_active && let Some(s) = &board_stripe {
+        if ar.is_none() && self.plane_active && let Some(s) = &board_stripe {
             let n_lines = self.plane_cal.add(&s.cam_pts);
             let last = self.plane_cal.last_rms.map(|r| format!(" — last fit {r:.1}mm")).unwrap_or_default();
             self.msgs.plane = format!("vary board tilt{last}");
@@ -392,7 +428,13 @@ impl Engine {
         // ── classify by 3-D volume membership; accumulate the scan ──
         self.pts_in.clear();
         self.pts_out.clear();
-        let plane = self.usable_plane();
+        let plane = if ar.is_some() {
+            // the saved plane is a physical sheet in camera coordinates; with
+            // ARCore per-frame intrinsics the saved camera model need not match
+            self.plane.as_ref().map(|p| (p.n, p.d))
+        } else {
+            self.usable_plane()
+        };
         let classified = !self.plane_active && plane.is_some() && pose.is_some() && found;
         if let (true, Some((n, d)), Some(p)) = (classified, plane, pose) {
             let mut inside = vec![false; self.laser_px.len()];

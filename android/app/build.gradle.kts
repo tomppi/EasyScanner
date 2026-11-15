@@ -39,6 +39,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+        }
         release {
             isMinifyEnabled = false
             // installable for on-device performance runs without a release key
@@ -69,6 +73,7 @@ dependencies {
     implementation("org.opencv:opencv:$opencvVersion")
     opencvAar("org.opencv:opencv:$opencvVersion@aar")
 
+    implementation("com.google.ar:core:1.49.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")

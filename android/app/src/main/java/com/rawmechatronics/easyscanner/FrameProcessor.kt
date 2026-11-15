@@ -1,6 +1,8 @@
 package com.rawmechatronics.easyscanner
 
 import android.media.ImageReader
+
+import java.nio.ByteBuffer
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -122,6 +124,38 @@ class FrameProcessor(filesDir: String, private val listener: Listener) : ImageRe
     }
 
     private fun report(msg: String) = main.post { listener.onError(msg) }
+
+    /** Process an ARCore camera frame with its pose and intrinsics, on the processing thread. */
+    fun processArFrame(
+        y: ByteBuffer, yStride: Int,
+        u: ByteBuffer, v: ByteBuffer, uvStride: Int, uvPixelStride: Int,
+        width: Int, height: Int, timestampNs: Long,
+        pose: DoubleArray, intrinsics: DoubleArray,
+    ) = handler.post {
+        if (handle == 0L) return@post
+        try {
+            val out = results.writeBuffer()
+            val t0 = System.nanoTime()
+            var n = NativeLib.nativeProcessAr(
+                handle, y, yStride, u, v, uvStride, uvPixelStride,
+                width, height, timestampNs, pose, intrinsics, out.data,
+            )
+            out.procMs = (System.nanoTime() - t0) / 1e6
+            if (n < 0) {
+                out.data = FloatArray(-n * 2)
+                n = 0
+            }
+            out.length = n
+            out.timestampNs = timestampNs
+            if (n == 0) return@post
+            results.publish()
+            listener.onResult(out)
+            if (out.events() and FrameResult.Ev.MESSAGES != 0) pullMessages()
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "AR frame failed", e)
+            report(e.message ?: "AR frame failed")
+        }
+    }
 
     fun release() {
         handler.post {

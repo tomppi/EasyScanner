@@ -17,7 +17,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 
 use jni::JNIEnv;
-use jni::objects::{JByteBuffer, JClass, JFloatArray, JString};
+use jni::objects::{ JByteBuffer, JClass, JFloatArray, JString, JDoubleArray };
 use jni::sys::{jint, jlong, jstring};
 use scan_algo::laser::YuvFrame;
 
@@ -128,6 +128,86 @@ pub extern "system" fn Java_com_rawmechatronics_easyscanner_NativeLib_nativeMess
     guard(&mut env, std::ptr::null_mut(), |env| {
         let msg = unsafe { engine(handle) }?.messages();
         new_string(env, &msg)
+    })
+}
+
+/// Process one YUV_420_888 frame with a camera pose and intrinsics supplied by an
+/// external tracker (ARCore). `pose` is 16 row-major doubles, scan-frame -> camera
+/// (R | t); `intrinsics` is [fx, fy, cx, cy, width, height, k1, k2, p1, p2, k3].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_rawmechatronics_easyscanner_NativeLib_nativeProcessAr<'l>(
+    mut env: JNIEnv<'l>,
+    _cls: JClass<'l>,
+    handle: jlong,
+    y: JByteBuffer<'l>,
+    y_stride: jint,
+    u: JByteBuffer<'l>,
+    v: JByteBuffer<'l>,
+    uv_stride: jint,
+    uv_pixel_stride: jint,
+    width: jint,
+    height: jint,
+    timestamp_ns: jlong,
+    pose: JDoubleArray<'l>,
+    intrinsics: JDoubleArray<'l>,
+    out: JFloatArray<'l>,
+) -> jint {
+    guard(&mut env, 0, |env| {
+        let (w, h) = (width as usize, height as usize);
+        let (ys, uvs, ps) = (y_stride as usize, uv_stride as usize, uv_pixel_stride as usize);
+        if w < 16 || h < 16 || ys < w || ps == 0 {
+            return Err(format!("bad frame geometry {w}x{h} stride {ys} ps {ps}"));
+        }
+        if env.get_array_length(&pose).map_err(|e| e.to_string())? < 16 {
+            return Err("pose needs 16 doubles".into());
+        }
+        if env.get_array_length(&intrinsics).map_err(|e| e.to_string())? < 11 {
+            return Err("intrinsics needs 11 doubles".into());
+        }
+        let mut p = [0f64; 16];
+        env.get_double_array_region(&pose, 0, &mut p).map_err(|e| e.to_string())?;
+        let mut ik = [0f64; 11];
+        env.get_double_array_region(&intrinsics, 0, &mut ik).map_err(|e| e.to_string())?;
+        let (yb, ub, vb) = (buffer(env, &y)?, buffer(env, &u)?, buffer(env, &v)?);
+        let uv_need = (h / 2 - 1) * uvs + (w / 2 - 1) * ps + 1;
+        if yb.len() < (h - 1) * ys + w || ub.len() < uv_need || vb.len() < uv_need {
+            return Err("image planes smaller than their geometry".into());
+        }
+        let camera_pose = scan_algo::geom::Pose {
+            r: [[p[0], p[1], p[2]], [p[4], p[5], p[6]], [p[8], p[9], p[10]]],
+            t: [p[3], p[7], p[11]],
+        };
+        let k = scan_algo::geom::Intrinsics {
+            fx: ik[0],
+            fy: ik[1],
+            cx: ik[2],
+            cy: ik[3],
+            width: ik[4],
+            height: ik[5],
+            dist: [ik[6], ik[7], ik[8], ik[9], ik[10]],
+        };
+        let frame = YuvFrame {
+            width: w,
+            height: h,
+            y: yb,
+            y_stride: ys,
+            u: ub,
+            v: vb,
+            uv_stride: uvs,
+            uv_pixel_stride: ps,
+        };
+        let data = unsafe { engine(handle) }?
+            .process_ar(&frame, timestamp_ns, camera_pose, k)
+            .map_err(|e| e.to_string())?;
+        let cap = env.get_array_length(&out).map_err(|e| e.to_string())? as usize;
+        if data.len() > cap {
+            return Ok(-(data.len() as jint));
+        }
+        let n = data.len() as jint;
+        env.set_float_array_region(&out, 0, data).map_err(|e| e.to_string())?;
+        unsafe { engine(handle) }?.clear_events();
+        Ok(n)
     })
 }
 
