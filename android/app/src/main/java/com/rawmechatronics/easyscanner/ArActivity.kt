@@ -629,11 +629,11 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
             for (pl in session?.getAllTrackables(Plane::class.java) ?: emptyList<Plane>()) {
                 if (pl.trackingState != TrackingState.TRACKING) continue
                 if (pl.type != Plane.Type.HORIZONTAL_UPWARD_FACING) continue
-                // use the LOWEST plane under the phone: the object may stand on
-                // something (board on a box) above the quilt; a higher plane would
-                // put the box floor above the object's base and cut it off.
+                // nearest horizontal plane under the phone: the object normally
+                // stands on the surface you are pointing at. The SETTINGS offset
+                // sinks the floor below it so the model base is not clipped.
                 val y = pl.centerPose.translation[1]
-                if (y < cam[1] && cam[1] - y < 1.0f && (planeY == null || y < planeY!!)) planeY = y
+                if (y < cam[1] && cam[1] - y < 1.2f && (planeY == null || y > planeY!!)) planeY = y
             }
         } catch (ex: Exception) {
             Log.w(TAG, "plane scan failed: " + ex.message)
