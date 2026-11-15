@@ -277,6 +277,7 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
         button("Clear origin") { setAnchor(null) }
         button("Scan") { toggleScan() }
         button("Save PLY") { exportPly() }
+        smallButton("SAVE SPLAT") { exportSplat() }
         val barScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             setBackgroundColor(0xCC000000.toInt())
@@ -756,6 +757,23 @@ class ArActivity : Activity(), GLSurfaceView.Renderer, FrameProcessor.Listener {
                         Log.e(TAG, "sp loop failed", ex)
                     }
                 }.start()
+            }
+        }
+    }
+
+    private fun exportSplat() {
+        val dir = getExternalFilesDir(null) ?: filesDir
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val ply = File(dir, "ar-scan-$stamp.ply")
+        val splat = File(dir, "ar-scan-$stamp.splat")
+        processor?.command(Cmd.EXPORT_PLY, ply.absolutePath) { msg ->
+            val n = try {
+                SplatExporter.convert(ply, splat)
+            } catch (ex: Exception) {
+                -1
+            }
+            runOnUiThread {
+                status.text = if (n > 0) "splat $n pts -> $splat" else "splat export failed: $msg"
             }
         }
     }

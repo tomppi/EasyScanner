@@ -39,7 +39,9 @@ object LoopCheck {
             Calib3d.decomposeEssentialMat(e, r1, r2, t)
             val a1 = DoubleArray(9); r1.get(0, 0, a1)
             val a2 = DoubleArray(9); r2.get(0, 0, a2)
-            rotErr = Math.min(rotationError(a1, prior), rotationError(a2, prior))
+            // decomposeEssentialMat may return either direction; accept the closer of R and R^T
+            fun err(r: DoubleArray) = Math.min(rotationError(r, prior), rotationError(transpose(r), prior))
+            rotErr = Math.min(err(a1), err(a2))
         }
         val E = DoubleArray(9)
         e.get(0, 0, E)
